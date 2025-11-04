@@ -4,3 +4,4 @@ This fork is a modification of td0g's original project.  I've added the ability 
 
 See the PDF for hardware schematic.
 
+Updated Nov25 for latest Raspberry Pi OS (Trixie) and changing from "obswebsocket" to "obsws_python" to support the latest OBS Web Sockets API.
