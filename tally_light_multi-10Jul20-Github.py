@@ -5,6 +5,9 @@
 #Original code written by td0g: https://github.com/td0g/OBS_TallyLight
 #Modified in Jul20 by SiliconKnight42 to support multiple lights (Program + Preview) and multiple cameras:  https://github.com/SiliconKnight42/OBS_TallyLight
 
+# 1Nov25 - the old OBS Websock code from 2020 is no longer working reliably (the Tally lights don't realize that OBS shutdown and fail to reconnect to newly restarted OBS session)
+#        - Code re-written for latest OBS Websockets version (now included with OBS)
+
 import sys
 import time
 import RPi.GPIO as GPIO
@@ -13,24 +16,28 @@ from pythonping import ping
 import itertools
 from multiping import MultiPing
 import socket
-logging.basicConfig(level=logging.INFO)
+#logging.basicConfig(level=logging.INFO)        #level can be 'logging.INFO' or 'logging.DEBUG'
 sys.path.append('../')
-from obswebsocket import obsws, events, requests  # noqa: E402
+#from obswebsocket import obsws, events, requests  # noqa: E402  # old websockets4 code
+import obsws_python as obs  # added 1Nov25 for websockets v5
 
 ############## User Configuration ###############
 windows_dev = False       #flag for use during Windows development and testing, turn off for Raspberry Pi deployment
-debug_level = 1         # Set amount of debug printing (0-4) -> higher is more print statements, 0 is off
+debug_level = 0         # Set amount of debug printing (0-4) -> higher is more print statements, 0 is off
 #Modified by G Cotton - 18Jun20 to enable multiple tally lights (Preview/Program) and specific Camera # (trigger_char -> cam_num_str) based on GPIO inputs
-port = 4444 #Should be 4444
-password = "12345" #Change to a unique password.  Use the same password in OBS -> Tools -> Websockets Server Settings -> Password
+
+## The following parameters now moved to "config.toml" file (per OBS Websockets v5 API)
+port = 4455 #Should be 4444 for old version, v5 of OBS websockets uses 4455
+password = "FUMCA8409" #Change to a unique password.  Use the same password in OBS -> Tools -> Websockets Server Settings -> Password
+
 IP_Addr_Base1 = "10.0.0."     #First IP Address base to scan for connection to OBS
-IP_Addr_Base2 = "192.168.3."  #Optional Alternate IP Address base to scan
+IP_Addr_Base2 = "192.168.0."  #Optional Alternate IP Address base to scan
 
 #Input Scene names
 #trigger_char = "+" #If this character is found in the scene name then tally light will illuminate
 # In final version, use GPIO reads to determine camera number - store as digits in string  - 3bits
 cam_num_str_base = "cam " #If this string of chars is found in the scene name then tally light will illuminate - correlate with Cam# to make it easier
-#Final format example 'cam 5' - number can be 1 through 8
+#Final format example 'cam 5' - number can be 1 through 8 - UPPER function is used, so this string base is NOT case senstive
 
 #Input/Output pin definitions
 GPIO_connected = 16 #-> Drives "Connected" LED (flashes when IP connetion established to OBS)
@@ -44,7 +51,7 @@ if debug_level >= 1: print('GPIOs OUT: Connected-',GPIO_connected, 'Tally Prev-'
 if debug_level >= 1: print('GPIOs IN: Cam Num Sel1',GPIO_Cam_Num_Sel1, 'Cam Num Sel2',GPIO_Cam_Num_Sel2, 'Cam Num Sel3', GPIO_Cam_Num_Sel3)   #Debug print to highlight GPIO Outputs
 
 ############## Script ###############
-ipAddressHistory = open("obsAddr.log","r")  # "obsAddr.log" is a text file with one line -> the last IP address to which the program connected
+ipAddressHistory = open("obsAddr.log","r")  # "obsAsuddr.log" is a text file with one line -> the last IP address to which the program connected
 host = ipAddressHistory.readline()
 ipAddressHistory.close()
 
@@ -113,10 +120,10 @@ def on_event(message):
     if format(message).find("SourceDestroyed event") > -1:
         connected = False
 
-def on_prev_switch(message):		#Event to be used when a Scene is Selected in Preview
+def on_current_preview_scene_changed(message):		#Event to be used when a Scene is Selected in Preview - ##Updated name of function to match new OBS Websockets v5 API
     global LED_prev_state
 #    print(u"  *****You selected in Preview scene {}".format(message.getSceneName()))
-    msg = message.getSceneName()
+    msg = message.scene_name
     if format(msg.upper()).find(cam_num_str) > -1:       #Set Preview LED status to ON if scene matches this camera, Set to upper case so that it's case insensitive
             GPIO.output(GPIO_tally_prev, 1)
             if debug_level >= 2: print(" %s - Preview LED %s ON" % (cam_num_str, "STAYS" if LED_prev_state == 1 else "TURNS"))
@@ -128,11 +135,10 @@ def on_prev_switch(message):		#Event to be used when a Scene is Selected in Prev
     if debug_level >= 4: print("Preview Switch Event  - Cam: %s      Preview LED %s   Program LED %s " % (cam_num_str, LED_prev_state, LED_prog_state))
     if debug_level >= 1: print("LED status for Cam# %s    Preview LED %s ---  Program LED %s" % (cam_num_str, LED_prev_state,LED_prog_state), end='\r')
 
-
-def on_prog_switch(message):		#Event to be used when a Scene is Transitioned into Program
+def on_current_program_scene_changed(message):		#Event to be used when a Scene is Transitioned into Program
     global LED_prog_state
 #    print(u"  *****You Transitioned into Program scene to {}".format(message.getSceneName()))
-    msg = message.getSceneName()
+    msg = message.scene_name
     if format(msg.upper()).find(cam_num_str) > -1:       #Set Program LED status to ON if scene matches this cameram, Set to upper case so that it's case insensitive
             GPIO.output(GPIO_tally_prog, 1)
             if debug_level >= 2: print(" %s - Program LED %s ON" % (cam_num_str, "STAYS" if LED_prog_state == 1 else "TURNS"))
@@ -144,8 +150,15 @@ def on_prog_switch(message):		#Event to be used when a Scene is Transitioned int
     if debug_level >= 4: print("Program Switch Event  - Cam: %s      Preview LED %s   Program LED %s " % (cam_num_str, LED_prev_state, LED_prog_state))
     if debug_level >= 1: print("LED status for Cam# %s    Preview LED %s ---  Program LED %s" % (cam_num_str, LED_prev_state,LED_prog_state), end='\r')
 
+def on_exit_started(message):
+     global connected
+     if debug_level >= 1: print("OBS Exit event received!  Resuming IP Addr search...")
+     connected = False      #If OBS Exit event received set connected state to false
+
+
 #Initialize GPIO input/output pins
-if debug_level >= 0: print("**** DEBUG PRINTING ENABLED: Level ",debug_level)
+print ("Tally Light script starting.")
+if debug_level >= 1: print("**** DEBUG PRINTING ENABLED: Level ",debug_level)
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(GPIO_connected, GPIO.OUT)
 GPIO.output(GPIO_connected, GPIO.HIGH) #Sets output to active High 3.3V
@@ -158,40 +171,72 @@ GPIO.setup(GPIO_Cam_Num_Sel1, GPIO.IN, pull_up_down=GPIO.PUD_DOWN) #setup input 
 GPIO.setup(GPIO_Cam_Num_Sel2, GPIO.IN, pull_up_down=GPIO.PUD_DOWN) #DOWN means open is 0
 GPIO.setup(GPIO_Cam_Num_Sel3, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 cam_num_str = cam_num_str_base.upper() + set_cam_num()     #Read the GPIO inputs to set the cam num - 3 bits, Num_Sel1 is LSB,   Set to upper case so that it's case insensitive
-if debug_level >= 1: print ("Cam Num: ", cam_num_str)
+print ("Tally Light script running - Cam Num: ", cam_num_str)
 try:
     while 1:
             addr = find_open_socket()
             if addr != "":
-                    ws = obsws(addr, port, password)
-                    ws.register(on_event)
-                    ws.register(on_prog_switch, events.SwitchScenes)	#Event for Scene going to Program
-                    ws.register(on_prev_switch, events.PreviewSceneChanged)  #Event for Scene selected in Preview
-                    ws.connect()
-                    message = ws.call(requests.GetCurrentScene())  #Get the Name of the Scene currently in Program (chk connection and set initial Prog LED state)
-                    sn = str(message)[str(message).find("name"):]
-                    sn = sn[:sn.find(",")]
-                    usn = sn.upper()
-                    connected = True
-                    if debug_level >= 1: print("Connected!  Current Scene in Program: ",sn)
+                    #old websockets v4 code
+                    #ws = obsws(addr, port, password)
+                    #ws.register(on_event)
+                    #ws.register(on_prog_switch, events.SwitchScenes)	#Event for Scene going to Program
+                    #ws.register(on_prev_switch, events.PreviewSceneChanged)  #Event for Scene selected in Preview
+                    #ws.connect()
+                    #message = ws.call(requests.GetCurrentScene())  #Get the Name of the Scene currently in Program (chk connection and set initial Prog LED state)
+                    #sn = str(message)[str(message).find("name"):]
+                    #sn = sn[:sn.find(",")]
+                    #usn = sn.upper()
+                    connected = False
+                    
+                    while connected is False:
+                        try:
+                            #new websockets v5 code
+                            reqcl = obs.ReqClient(host=addr, port=port, password=password)
+                            evtcl = obs.EventClient(host=addr, port=port, password=password)
+                        
+                            evtcl.callback.register(on_current_preview_scene_changed)
+                            evtcl.callback.register(on_current_program_scene_changed)        
+                            evtcl.callback.register(on_exit_started)
+                            message = reqcl.get_current_program_scene()
+                            sn = message.scene_name
+                            usn = sn.upper()                 
+                            connected = True
+                        except:
+                            time.sleep(1)     #wait 1 second if connection error
+                            if debug_level >= 1: print("Found OBS and tried to connect, but couldn't.  Waiting for OBS to be ready...")
+                            pass
+
+                    
+                    if debug_level >= 1: print("Connected!  Current Scene in Program: ",sn, " ", usn)
                     ipAddressHistory = open("obsAddr.log","w")      #Store the connected IP address in the log file
                     ipAddressHistory.write(addr)
                     ipAddressHistory.close()
-                    if usn.find(cam_num_str) > -1:           #Set initial Program LED states  (since changes are based on events) - No way to determine current Preview scene?
-#                      GPIO.output(GPIO_tally_prev, 1)
-#                      if debug_level >= 1: print("   Preview LED ON")
-#                      LED_prev_state = 1
-                      GPIO.output(GPIO_tally_prog, 1)
-                      if debug_level >= 1: print("   Program LED ON")
-                      LED_prog_state = 1
-                    message = ws.call(requests.GetPreviewScene())   #Get the Name of the Scene currently in Preview (chk connection and set initial Prog LED state)
-                    sn = str(message)[str(message).find("name"):]
-                    sn = sn[:sn.find(",")]
-                    usn = sn.upper()
-                    if usn.find(cam_num_str) > -1:           #Set initial Program LED states  (since changes are based on events) - No way to determine current Preview scene?
+
+                    message = reqcl.get_current_preview_scene()
+                    sn = message.scene_name
+                    usn = sn.upper()                 
+                    if usn.find(cam_num_str) > -1:           #Set initial Preivew LED states  (since changes are based on events)
                       GPIO.output(GPIO_tally_prev, 1)
                       if debug_level >= 1: print("   Preview LED ON")
                       LED_prev_state = 1
+
+                    message = reqcl.get_current_program_scene()
+                    sn = message.scene_name
+                    usn = sn.upper()                 
+                    if usn.find(cam_num_str) > -1:           #Set initial Program LED state
+                      GPIO.output(GPIO_tally_prog, 1)
+                      if debug_level >= 1: print("   Program LED ON")
+                      LED_prog_state = 1
+
+                    # old code
+#                    message = ws.call(requests.GetPreviewScene())   #Get the Name of the Scene currently in Preview (chk connection and set initial Prog LED state)
+#                    sn = str(message)[str(message).find("name"):]
+#                    sn = sn[:sn.find(",")]
+#                    usn = sn.upper()
+#                    if usn.find(cam_num_str) > -1:           #Set initial Program LED states  (since changes are based on events) - No way to determine current Preview scene?
+#                      GPIO.output(GPIO_tally_prev, 1)
+#                      if debug_level >= 1: print("   Preview LED ON")
+#                      LED_prev_state = 1
 					  
             while connected:        #Flash the Connected LED, 20ms on, 980ms off to indicate connected state=TRUE
                 GPIO.output(GPIO_connected, GPIO.LOW)
@@ -225,6 +270,7 @@ except KeyboardInterrupt:
     except:
       pass
 
+print ("Tally Light script exiting")
 GPIO.output(GPIO_tally_prev, 0)     #Turn off LEDs when shutting down
 GPIO.output(GPIO_tally_prog, 0)     #Turn off LEDs when shutting down
 GPIO.output(GPIO_connected, 0)      #Turn off LEDs when shutting down
